@@ -1,3 +1,9 @@
+https://github.com/s9roll7/animatediff-cli-prompt-travel 
+
+controlnet 기능만 추가
+
+----------------------------------------------------------
+
 # animatediff
 [![pre-commit.ci status](https://results.pre-commit.ci/badge/github/neggles/animatediff-cli/main.svg)](https://results.pre-commit.ci/latest/github/neggles/animatediff-cli/main)
 
