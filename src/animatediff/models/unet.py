@@ -147,9 +147,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
                 resnet_time_scale_shift=resnet_time_scale_shift,
                 unet_use_cross_frame_attention=unet_use_cross_frame_attention,
                 unet_use_temporal_attention=unet_use_temporal_attention,
-                use_motion_module=use_motion_module
-                and (res in motion_module_resolutions)
-                and (not motion_module_decoder_only),
+                use_motion_module=use_motion_module and (res in motion_module_resolutions) and (not motion_module_decoder_only),
                 motion_module_type=motion_module_type,
                 motion_module_kwargs=motion_module_kwargs,
             )
@@ -230,9 +228,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
             prev_output_channel = output_channel
 
         # out
-        self.conv_norm_out = nn.GroupNorm(
-            num_channels=block_out_channels[0], num_groups=norm_num_groups, eps=norm_eps
-        )
+        self.conv_norm_out = nn.GroupNorm(num_channels=block_out_channels[0], num_groups=norm_num_groups, eps=norm_eps)
         self.conv_act = nn.SiLU()
         self.conv_out = InflatedConv3d(block_out_channels[0], out_channels, kernel_size=3, padding=1)
 
@@ -314,6 +310,8 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         attention_mask: Optional[Tensor] = None,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         added_cond_kwargs: Optional[Dict[str, torch.Tensor]] = None,
+        down_block_additional_residuals: Optional[Tuple[torch.Tensor]] = None,
+        mid_block_additional_residual: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         return_dict: bool = True,
     ) -> Union[UNet3DConditionOutput, Tuple]:
@@ -429,11 +427,18 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
                     encoder_attention_mask=encoder_attention_mask,
                 )
             else:
-                sample, res_samples = downsample_block(
-                    hidden_states=sample, temb=emb, encoder_hidden_states=encoder_hidden_states
-                )
+                sample, res_samples = downsample_block(hidden_states=sample, temb=emb, encoder_hidden_states=encoder_hidden_states)
 
             down_block_res_samples = down_block_res_samples + res_samples
+
+        if down_block_additional_residuals is not None:
+            new_down_block_res_samples = ()
+
+            for down_block_res_sample, down_block_additional_residual in zip(down_block_res_samples, down_block_additional_residuals):
+                down_block_res_sample = down_block_res_sample + down_block_additional_residual
+                new_down_block_res_samples = new_down_block_res_samples + (down_block_res_sample,)
+
+            down_block_res_samples = new_down_block_res_samples
 
         # 4. mid
         if self.mid_block is not None:
@@ -445,6 +450,8 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
                 cross_attention_kwargs=cross_attention_kwargs,
             )
 
+        if mid_block_additional_residual is not None:
+            sample = sample + mid_block_additional_residual
         # up
         for i, upsample_block in enumerate(self.up_blocks):
             is_final_block = i == len(self.up_blocks) - 1
@@ -529,9 +536,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
 
         elif pretrained_model_path.joinpath(WEIGHTS_NAME).exists():
             logger.debug(f"loading weights from {pretrained_model_path} ...")
-            state_dict = torch.load(
-                pretrained_model_path.joinpath(WEIGHTS_NAME), map_location="cpu", weights_only=True
-            )
+            state_dict = torch.load(pretrained_model_path.joinpath(WEIGHTS_NAME), map_location="cpu", weights_only=True)
         else:
             raise FileNotFoundError(f"no weights file found in {pretrained_model_path}")
 
@@ -542,9 +547,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
             elif motion_module_path.suffix.lower() == ".safetensors":
                 motion_state_dict = load_file(motion_module_path, device="cpu")
             else:
-                raise RuntimeError(
-                    f"unknown file format for motion module weights: {motion_module_path.suffix}"
-                )
+                raise RuntimeError(f"unknown file format for motion module weights: {motion_module_path.suffix}")
         else:
             raise FileNotFoundError(f"no motion module weights found in {motion_module_path}")
 

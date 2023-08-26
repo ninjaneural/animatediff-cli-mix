@@ -37,7 +37,7 @@ def get_base_model(model_name_or_path: str, local_dir: Path, force: bool = False
     if model_is_repo_id:
         logger.debug("Base model is a HuggingFace repo ID")
         if model_save_dir.joinpath("model_index.json").exists():
-            logger.debug(f"Base model already downloaded to: {path_from_cwd(model_save_dir)}")
+            logger.debug(f"Base model already downloaded to: {(model_save_dir)}")
         else:
             logger.info(f"Downloading base model from {model_name_or_path}...")
             _ = get_hf_pipeline(model_name_or_path, model_save_dir, save=True, force_download=force)
@@ -51,7 +51,7 @@ def checkpoint_to_pipeline(
     target_dir: Optional[Path] = None,
     save: bool = True,
 ) -> StableDiffusionPipeline:
-    logger.debug(f"Converting checkpoint {path_from_cwd(checkpoint)}")
+    logger.debug(f"Converting checkpoint {(checkpoint)}")
     if target_dir is None:
         target_dir = pipeline_dir.joinpath(checkpoint.stem)
 
@@ -63,7 +63,7 @@ def checkpoint_to_pipeline(
     target_dir.mkdir(parents=True, exist_ok=True)
 
     if save:
-        logger.info(f"Saving pipeline to {path_from_cwd(target_dir)}")
+        logger.info(f"Saving pipeline to {(target_dir)}")
         pipeline.save_pretrained(target_dir, safe_serialization=True)
     return pipeline, target_dir
 

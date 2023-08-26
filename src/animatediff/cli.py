@@ -32,15 +32,34 @@ data_dir = get_dir("data")
 checkpoint_dir = data_dir.joinpath("models/sd")
 pipeline_dir = data_dir.joinpath("models/huggingface")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(message)s",
-    datefmt="%H:%M:%S",
-    handlers=[
-        RichHandler(console=console, rich_tracebacks=True),
-    ],
-    force=True,
-)
+try:
+    import google.colab
+
+    IN_COLAB = True
+except:
+    IN_COLAB = False
+
+if IN_COLAB:
+    import sys
+
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stdout,
+        format="%(message)s",
+        datefmt="%H:%M:%S",
+        force=True,
+    )
+else:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        handlers=[
+            RichHandler(console=console, rich_tracebacks=True),
+        ],
+        datefmt="%H:%M:%S",
+        force=True,
+    )
+
 logger = logging.getLogger(__name__)
 
 
@@ -137,7 +156,7 @@ def generate(
         typer.Option(
             "--overlap",
             "-O",
-            min=1,
+            min=0,
             max=12,
             help="Number of frames to overlap in context (default: context//2)",
             show_default=False,
@@ -170,9 +189,7 @@ def generate(
     ] = 1,
     device: Annotated[
         str,
-        typer.Option(
-            "--device", "-d", help="Device to run on (cpu, cuda, cuda:id)", rich_help_panel="Advanced"
-        ),
+        typer.Option("--device", "-d", help="Device to run on (cpu, cuda, cuda:id)", rich_help_panel="Advanced"),
     ] = "cuda",
     use_xformers: Annotated[
         bool,
@@ -285,9 +302,7 @@ def generate(
     if pipeline.device == device:
         logger.info("Pipeline already on the correct device, skipping device transfer")
     else:
-        pipeline = send_to_device(
-            pipeline, device, freeze=True, force_half=force_half_vae, compile=model_config.compile
-        )
+        pipeline = send_to_device(pipeline, device, freeze=True, force_half=force_half_vae, compile=model_config.compile)
 
     # save config to output directory
     logger.info("Saving prompt config to output directory")
@@ -337,6 +352,7 @@ def generate(
                 context_overlap=overlap,
                 context_stride=stride,
                 clip_skip=model_config.clip_skip,
+                controlnet_map=model_config.controlnet_map,
             )
             outputs.append(output)
             torch.cuda.empty_cache()

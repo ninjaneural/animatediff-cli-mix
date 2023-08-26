@@ -10,7 +10,7 @@ import torch
 from diffusers.configuration_utils import FrozenDict
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.loaders import LoraLoaderMixin, TextualInversionLoaderMixin
-from diffusers.models import AutoencoderKL
+from diffusers.models import AutoencoderKL, ControlNetModel
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.schedulers import (
     DDIMScheduler,
@@ -25,6 +25,7 @@ from diffusers.utils import (
     deprecate,
     is_accelerate_available,
     is_accelerate_version,
+    is_compiled_module,
     randn_tensor,
 )
 from einops import rearrange
@@ -61,6 +62,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         LMSDiscreteScheduler,
         PNDMScheduler,
     ]
+    controlnet_map: Dict[str, ControlNetModel]
 
     def __init__(
         self,
@@ -77,6 +79,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             DPMSolverMultistepScheduler,
         ],
         feature_extractor: CLIPImageProcessor,
+        controlnet_map: Dict[str, ControlNetModel] = None,
     ):
         super().__init__()
 
@@ -107,9 +110,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             new_config["clip_sample"] = False
             scheduler._internal_dict = FrozenDict(new_config)
 
-        is_unet_version_less_0_9_0 = hasattr(unet.config, "_diffusers_version") and version.parse(
-            version.parse(unet.config._diffusers_version).base_version
-        ) < version.parse("0.9.0.dev0")
+        is_unet_version_less_0_9_0 = hasattr(unet.config, "_diffusers_version") and version.parse(version.parse(unet.config._diffusers_version).base_version) < version.parse("0.9.0.dev0")
         is_unet_sample_size_less_64 = hasattr(unet.config, "sample_size") and unet.config.sample_size < 64
         if is_unet_version_less_0_9_0 and is_unet_sample_size_less_64:
             deprecation_message = (
@@ -138,6 +139,8 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         )
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
+        self.control_image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True, do_normalize=False)
+        self.controlnet_map = controlnet_map
 
     def enable_vae_slicing(self):
         r"""
@@ -196,6 +199,9 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         if self.safety_checker is not None:
             _, hook = cpu_offload_with_hook(self.safety_checker, device, prev_module_hook=hook)
 
+        # control net hook has be manually offloaded as it alternates with unet
+        cpu_offload_with_hook(self.controlnet, device)
+
         # We'll offload the last model manually.
         self.final_offload_hook = hook
 
@@ -209,11 +215,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         if not hasattr(self.unet, "_hf_hook"):
             return self.device
         for module in self.unet.modules():
-            if (
-                hasattr(module, "_hf_hook")
-                and hasattr(module._hf_hook, "execution_device")
-                and module._hf_hook.execution_device is not None
-            ):
+            if hasattr(module, "_hf_hook") and hasattr(module._hf_hook, "execution_device") and module._hf_hook.execution_device is not None:
                 return torch.device(module._hf_hook.execution_device)
         return self.device
 
@@ -251,21 +253,11 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             text_input_ids = text_inputs.input_ids
             untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
 
-            if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(
-                text_input_ids, untruncated_ids
-            ):
-                removed_text = self.tokenizer.batch_decode(
-                    untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1]
-                )
-                logger.warning(
-                    "The following part of your input was truncated because CLIP can only handle sequences up to"
-                    f" {self.tokenizer.model_max_length} tokens: {removed_text}"
-                )
+            if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(text_input_ids, untruncated_ids):
+                removed_text = self.tokenizer.batch_decode(untruncated_ids[:, self.tokenizer.model_max_length - 1 : -1])
+                logger.warning("The following part of your input was truncated because CLIP can only handle sequences up to" f" {self.tokenizer.model_max_length} tokens: {removed_text}")
 
-            if (
-                hasattr(self.text_encoder.config, "use_attention_mask")
-                and self.text_encoder.config.use_attention_mask
-            ):
+            if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
                 attention_mask = text_inputs.attention_mask.to(device)
             else:
                 attention_mask = None
@@ -288,10 +280,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             if negative_prompt is None:
                 uncond_tokens = [""] * batch_size
             elif prompt is not None and type(prompt) is not type(negative_prompt):
-                raise TypeError(
-                    f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
-                    f" {type(prompt)}."
-                )
+                raise TypeError(f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !=" f" {type(prompt)}.")
             elif isinstance(negative_prompt, str):
                 uncond_tokens = [negative_prompt]
             elif batch_size != len(negative_prompt):
@@ -317,10 +306,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             )
             uncond_input_ids = uncond_input.input_ids
 
-            if (
-                hasattr(self.text_encoder.config, "use_attention_mask")
-                and self.text_encoder.config.use_attention_mask
-            ):
+            if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
                 attention_mask = uncond_input.attention_mask.to(device)
             else:
                 attention_mask = None
@@ -339,9 +325,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             negative_prompt_embeds = negative_prompt_embeds.to(dtype=self.text_encoder.dtype, device=device)
 
             negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_videos_per_prompt, 1)
-            negative_prompt_embeds = negative_prompt_embeds.view(
-                batch_size * num_videos_per_prompt, seq_len, -1
-            )
+            negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_videos_per_prompt, seq_len, -1)
 
             # For classifier free guidance, we need to do two forward passes.
             # Here we concatenate the unconditional and text embeddings into a single batch
@@ -357,9 +341,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         # video = self.vae.decode(latents).sample
         video = []
         for frame_idx in range(latents.shape[0]):
-            video.append(
-                self.vae.decode(latents[frame_idx : frame_idx + 1].to(self.vae.device, self.vae.dtype)).sample
-            )
+            video.append(self.vae.decode(latents[frame_idx : frame_idx + 1].to(self.vae.device, self.vae.dtype)).sample)
         video = torch.cat(video)
         video = rearrange(video, "(b f) c h w -> b c f h w", f=video_length)
         video = (video / 2 + 0.5).clamp(0, 1)
@@ -397,31 +379,18 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         if height % 8 != 0 or width % 8 != 0:
             raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
 
-        if (callback_steps is None) or (
-            callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)
-        ):
-            raise ValueError(
-                f"`callback_steps` has to be a positive integer but is {callback_steps} of type"
-                f" {type(callback_steps)}."
-            )
+        if (callback_steps is None) or (callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0)):
+            raise ValueError(f"`callback_steps` has to be a positive integer but is {callback_steps} of type" f" {type(callback_steps)}.")
 
         if prompt is not None and prompt_embeds is not None:
-            raise ValueError(
-                f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
-                " only forward one of the two."
-            )
+            raise ValueError(f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to" " only forward one of the two.")
         elif prompt is None and prompt_embeds is None:
-            raise ValueError(
-                "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
-            )
+            raise ValueError("Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined.")
         elif prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
             raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
 
         if negative_prompt is not None and negative_prompt_embeds is not None:
-            raise ValueError(
-                f"Cannot forward both `negative_prompt`: {negative_prompt} and `negative_prompt_embeds`:"
-                f" {negative_prompt_embeds}. Please make sure to only forward one of the two."
-            )
+            raise ValueError(f"Cannot forward both `negative_prompt`: {negative_prompt} and `negative_prompt_embeds`:" f" {negative_prompt_embeds}. Please make sure to only forward one of the two.")
 
         if prompt_embeds is not None and negative_prompt_embeds is not None:
             if prompt_embeds.shape != negative_prompt_embeds.shape:
@@ -430,6 +399,36 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                     f" got: `prompt_embeds` {prompt_embeds.shape} != `negative_prompt_embeds`"
                     f" {negative_prompt_embeds.shape}."
                 )
+
+    def prepare_image(
+        self,
+        image,
+        width,
+        height,
+        batch_size,
+        num_images_per_prompt,
+        device,
+        dtype,
+        do_classifier_free_guidance=False,
+        guess_mode=False,
+    ):
+        image = self.control_image_processor.preprocess(image, height=height, width=width).to(dtype=torch.float32)
+        image_batch_size = image.shape[0]
+
+        if image_batch_size == 1:
+            repeat_by = batch_size
+        else:
+            # image batch size is the same as prompt batch size
+            repeat_by = num_images_per_prompt
+
+        image = image.repeat_interleave(repeat_by, dim=0)
+
+        image = image.to(device=device, dtype=dtype)
+
+        if do_classifier_free_guidance and not guess_mode:
+            image = torch.cat([image] * 2)
+
+        return image
 
     def prepare_latents(
         self,
@@ -491,6 +490,8 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         context_overlap: int = 4,
         context_schedule: str = "uniform",
         clip_skip: int = 1,
+        controlnet_type_map: Dict[str, Dict[str, float]] = None,
+        controlnet_image_map: Dict[int, Dict[str, Any]] = None,
         **kwargs,
     ):
         # Default height and width to unet
@@ -501,9 +502,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         sequential_mode = video_length is not None and video_length > 48
 
         # 1. Check inputs. Raise error if not correct
-        self.check_inputs(
-            prompt, height, width, callback_steps, negative_prompt, prompt_embeds, negative_prompt_embeds
-        )
+        self.check_inputs(prompt, height, width, callback_steps, negative_prompt, prompt_embeds, negative_prompt_embeds)
 
         # Define call parameters
         batch_size = 1
@@ -521,9 +520,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         do_classifier_free_guidance = guidance_scale > 1.0
 
         # 3. Encode input prompt
-        text_encoder_lora_scale = (
-            cross_attention_kwargs.get("scale", None) if cross_attention_kwargs is not None else None
-        )
+        text_encoder_lora_scale = cross_attention_kwargs.get("scale", None) if cross_attention_kwargs is not None else None
         prompt_embeds = self._encode_prompt(
             prompt,
             device,
@@ -535,6 +532,91 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             lora_scale=text_encoder_lora_scale,
             clip_skip=clip_skip,
         )
+
+        # 3.5 Prepare controlnet variables
+
+        # controlnet_image_map
+        # { 0 : { "type_str" : IMAGE, "type_str2" : IMAGE }  }
+
+        if controlnet_image_map:
+            for key_frame_no, _ in list(controlnet_image_map.items()):
+                if int(key_frame_no) >= video_length:
+                    del controlnet_image_map[key_frame_no]
+            for key_frame_no in controlnet_image_map:
+                for t, img in controlnet_image_map[key_frame_no].items():
+                    controlnet_image_map[key_frame_no][t] = self.prepare_image(
+                        image=img,
+                        width=width,
+                        height=height,
+                        batch_size=1 * 1,
+                        num_images_per_prompt=1,
+                        device=device,
+                        dtype=self.controlnet_map[t].dtype,
+                        do_classifier_free_guidance=do_classifier_free_guidance,
+                        guess_mode=False,
+                    )
+
+        # { "0_type_str" : { "scales" = [0.1, 0.3, 0.5, 1.0, 0.5, 0.3, 0.1], "frames"=[125, 126, 127, 0, 1, 2, 3] }}
+        controlnet_scale_map = {}
+        controlnet_affected_list = [False for i in range(video_length)]
+        print(f"controlnet_affected_list {controlnet_affected_list}")
+
+        if controlnet_image_map:
+            for key_frame_no in controlnet_image_map:
+                for type_str in controlnet_image_map[key_frame_no]:
+                    scale_list = controlnet_type_map[type_str]["control_scale_list"]
+                    scale_len = len(scale_list)
+
+                    frames = [i if 0 <= i < video_length else (i + video_length if 0 > i else i - video_length) for i in range(key_frame_no - scale_len, key_frame_no + scale_len + 1)]
+                    print(f"frames {frames}")
+
+                    controlnet_scale_map[str(key_frame_no) + "_" + type_str] = {
+                        "scales": scale_list[::-1] + [1.0] + scale_list,
+                        "frames": frames,
+                    }
+
+                    for f in frames:
+                        controlnet_affected_list[f] = True
+
+        def controlnet_is_affected(frame_index: int):
+            return controlnet_affected_list[frame_index]
+
+        def get_controlnet_scale(
+            type: str,
+            cur_step: int,
+            step_length: int,
+        ):
+            s = controlnet_type_map[type]["control_guidance_start"]
+            e = controlnet_type_map[type]["control_guidance_end"]
+            keep = 1.0 - float(cur_step / len(timesteps) < s or (cur_step + 1) / step_length > e)
+
+            scale = controlnet_type_map[type]["controlnet_conditioning_scale"]
+
+            return keep * scale
+
+        def get_controlnet_variable(
+            frame_index: int,
+            cur_step: int,
+            step_length: int,
+        ):
+            cont_vars = []
+
+            if not controlnet_image_map:
+                return None
+
+            if frame_index not in controlnet_image_map:
+                return None
+
+            for t, img in controlnet_image_map[frame_index].items():
+                cont_vars.append(
+                    {
+                        "type": t,
+                        "image": img,
+                        "cond_scale": get_controlnet_scale(t, cur_step, step_length),
+                    }
+                )
+
+            return cont_vars
 
         # 4. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=latents_device)
@@ -578,20 +660,105 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                     device=latents.device,
                     dtype=latents.dtype,
                 )
-                counter = torch.zeros(
-                    (1, 1, latents.shape[2], 1, 1), device=latents.device, dtype=latents.dtype
-                )
+                counter = torch.zeros((1, 1, latents.shape[2], 1, 1), device=latents.device, dtype=latents.dtype)
 
-                for context in context_scheduler(
-                    i, num_inference_steps, latents.shape[2], context_frames, context_stride, context_overlap
-                ):
-                    # expand the latents if we are doing classifier free guidance
-                    latent_model_input = (
-                        latents[:, :, context]
-                        .to(device)
-                        .repeat(2 if do_classifier_free_guidance else 1, 1, 1, 1, 1)
+                # { "0_type_str" : (down_samples, mid_sample)  }
+                controlnet_result = {}
+
+                def get_controlnet_result(context: List[int] = None):
+                    # logger.info(f"get_controlnet_result called {context=}")
+
+                    hit = False
+                    for n in context:
+                        if controlnet_is_affected(n):
+                            hit = True
+                            break
+                    if hit == False:
+                        return None, None
+
+                    _down_block_res_samples = []
+
+                    s = list(controlnet_result.values())[0]
+                    for ii in range(len(s[0])):
+                        _down_block_res_samples.append(
+                            torch.zeros(
+                                (s[0][ii].shape[0], s[0][ii].shape[1], len(context), *s[0][ii].shape[3:]),
+                                device=device,
+                                dtype=s[0][ii].dtype,
+                            )
+                        )
+                    _mid_block_res_samples = torch.zeros(
+                        (s[1].shape[0], s[1].shape[1], len(context), *s[1].shape[3:]),
+                        device=device,
+                        dtype=s[1].dtype,
                     )
+
+                    for result in controlnet_result:
+                        val = controlnet_result[result]
+                        loc = list(set(context) & set(controlnet_scale_map[result]["frames"]))
+                        scales = []
+
+                        for o in loc:
+                            for j, f in enumerate(controlnet_scale_map[result]["frames"]):
+                                if o == f:
+                                    scales.append(controlnet_scale_map[result]["scales"][j])
+                                    break
+                        loc_index = []
+
+                        for o in loc:
+                            for j, f in enumerate(context):
+                                if o == f:
+                                    loc_index.append(j)
+                                    break
+
+                        mod = torch.tensor(scales).to(device, dtype=val[1].dtype)
+
+                        add = val[1] * mod[None, None, :, None, None]
+                        _mid_block_res_samples[:, :, loc_index, :, :] = _mid_block_res_samples[:, :, loc_index, :, :] + add
+
+                        for ii in range(len(val[0])):
+                            mod = torch.tensor(scales).to(device, dtype=val[0][ii].dtype)
+                            add = val[0][ii] * mod[None, None, :, None, None]
+                            _down_block_res_samples[ii][:, :, loc_index, :, :] = _down_block_res_samples[ii][:, :, loc_index, :, :] + add
+
+                    return _down_block_res_samples, _mid_block_res_samples
+
+                for frame_no in range(latents.shape[2]):
+                    cont_vars = get_controlnet_variable(frame_no, i, len(timesteps))
+                    if not cont_vars:
+                        continue
+
+                    latent_model_input = latents[:, :, [frame_no]].to(device).repeat(2 if do_classifier_free_guidance else 1, 1, 1, 1, 1)
+                    control_model_input = self.scheduler.scale_model_input(latent_model_input, t)[:, :, 0]
+                    controlnet_prompt_embeds = prompt_embeds
+
+                    down_samples = None
+                    mid_sample = None
+
+                    for cont_var in cont_vars:
+                        _down_samples, _mid_sample = self.controlnet_map[cont_var["type"]](
+                            control_model_input,
+                            t,
+                            encoder_hidden_states=controlnet_prompt_embeds,
+                            controlnet_cond=cont_var["image"],
+                            conditioning_scale=cont_var["cond_scale"],
+                            guess_mode=False,
+                            return_dict=False,
+                        )
+                        down_samples, mid_sample = _down_samples, _mid_sample
+
+                        for ii in range(len(down_samples)):
+                            down_samples[ii] = rearrange(down_samples[ii], "(b f) c h w -> b c f h w", f=1)
+                        mid_sample = rearrange(mid_sample, "(b f) c h w -> b c f h w", f=1)
+
+                        controlnet_result[str(frame_no) + "_" + cont_var["type"]] = (down_samples, mid_sample)
+
+                for context in context_scheduler(i, num_inference_steps, latents.shape[2], context_frames, context_stride, context_overlap):
+                    # expand the latents if we are doing classifier free guidance
+                    latent_model_input = latents[:, :, context].to(device).repeat(2 if do_classifier_free_guidance else 1, 1, 1, 1, 1)
                     latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+
+                    down_block_res_samples, mid_block_res_sample = get_controlnet_result(context)
 
                     # predict the noise residual
                     pred = self.unet(
@@ -599,6 +766,8 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                         t,
                         encoder_hidden_states=prompt_embeds,
                         cross_attention_kwargs=cross_attention_kwargs,
+                        down_block_additional_residuals=down_block_res_samples,
+                        mid_block_additional_residual=mid_block_res_sample,
                         return_dict=False,
                     )[0]
 
@@ -622,9 +791,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                 )[0]
 
                 # call the callback, if provided
-                if i == len(timesteps) - 1 or (
-                    (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
-                ):
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     if callback is not None and i % callback_steps == 0:
                         callback(i, t, latents)
 
@@ -651,9 +818,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         if not hasattr(self, "_progress_bar_config"):
             self._progress_bar_config = {}
         elif not isinstance(self._progress_bar_config, dict):
-            raise ValueError(
-                f"`self._progress_bar_config` should be of type `dict`, but is {type(self._progress_bar_config)}."
-            )
+            raise ValueError(f"`self._progress_bar_config` should be of type `dict`, but is {type(self._progress_bar_config)}.")
 
         if iterable is not None:
             return tqdm(iterable, **self._progress_bar_config)
