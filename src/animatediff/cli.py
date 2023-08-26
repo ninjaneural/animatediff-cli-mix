@@ -156,7 +156,7 @@ def generate(
         typer.Option(
             "--overlap",
             "-O",
-            min=0,
+            min=1,
             max=12,
             help="Number of frames to overlap in context (default: context//2)",
             show_default=False,
@@ -168,7 +168,7 @@ def generate(
         typer.Option(
             "--stride",
             "-S",
-            min=1,
+            min=0,
             max=8,
             help="Max motion stride as a power of 2 (default: 4)",
             show_default=False,

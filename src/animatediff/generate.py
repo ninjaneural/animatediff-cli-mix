@@ -234,7 +234,6 @@ def run_inference(
                             "control_scale_list": item["control_scale_list"],
                         }
                     for img_path in cond_imgs:
-                        print(img_path)
                         frame_no = int(Path(img_path).stem)
                         if frame_no not in controlnet_image_map:
                             controlnet_image_map[frame_no] = {}

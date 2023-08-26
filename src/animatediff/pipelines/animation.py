@@ -559,7 +559,6 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         # { "0_type_str" : { "scales" = [0.1, 0.3, 0.5, 1.0, 0.5, 0.3, 0.1], "frames"=[125, 126, 127, 0, 1, 2, 3] }}
         controlnet_scale_map = {}
         controlnet_affected_list = [False for i in range(video_length)]
-        print(f"controlnet_affected_list {controlnet_affected_list}")
 
         if controlnet_image_map:
             for key_frame_no in controlnet_image_map:
@@ -568,7 +567,6 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
                     scale_len = len(scale_list)
 
                     frames = [i if 0 <= i < video_length else (i + video_length if 0 > i else i - video_length) for i in range(key_frame_no - scale_len, key_frame_no + scale_len + 1)]
-                    print(f"frames {frames}")
 
                     controlnet_scale_map[str(key_frame_no) + "_" + type_str] = {
                         "scales": scale_list[::-1] + [1.0] + scale_list,
