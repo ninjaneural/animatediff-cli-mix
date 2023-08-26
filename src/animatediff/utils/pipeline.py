@@ -14,12 +14,12 @@ logger = logging.getLogger(__name__)
 
 
 def send_to_device(
-    pipeline: StableDiffusionPipeline,
+    pipeline: AnimationPipeline,
     device: torch.device,
     freeze: bool = True,
     force_half: bool = False,
     compile: bool = False,
-) -> StableDiffusionPipeline:
+) -> AnimationPipeline:
     logger.info(f"Sending pipeline to device \"{device.type}{device.index if device.index else ''}\"")
 
     # Freeze model weights and force-disable training
