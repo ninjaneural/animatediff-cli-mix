@@ -33,6 +33,20 @@ openpose_processor = None
 softedge_processor = None
 
 
+def load_safetensors_lora(text_encoder, unet, lora_path, alpha=0.75, is_animatediff=True):
+    from safetensors.torch import load_file
+
+    from animatediff.utils.lora_diffusers import LoRANetwork, create_network_from_weights
+
+    sd = load_file(lora_path)
+
+    print(f"create LoRA network")
+    lora_network: LoRANetwork = create_network_from_weights(text_encoder, unet, sd, multiplier=alpha, is_animatediff=is_animatediff)
+    print(f"load LoRA network weights")
+    lora_network.load_state_dict(sd, False)
+    lora_network.merge_to(alpha)
+
+
 def create_controlnet_model(type_str):
     if type_str == "controlnet_tile":
         return ControlNetModel.from_pretrained("lllyasviel/control_v11f1e_sd15_tile")
@@ -157,6 +171,14 @@ def create_pipeline(
 
     # I'll deal with LoRA later...
 
+    # lora
+    for l in model_config.lora_map:
+        lora_path = data_dir.joinpath(l)
+        if lora_path.is_file():
+            logger.info(f"Loading lora {lora_path}")
+            logger.info(f"alpha = {model_config.lora_map[l]}")
+            load_safetensors_lora(text_encoder, unet, lora_path, alpha=model_config.lora_map[l])
+
     # controlnet
     controlnet_map = {}
     if model_config.controlnet_map:
@@ -273,7 +295,7 @@ def run_inference(
     prompt_str = "_".join((prompt_tags[:6]))
 
     # generate the output filename and save the video
-    out_str = f"{idx:02d}_{seed}_{prompt_str}"[:251]
+    out_str = f"{idx:02d}_{seed}"[:251]
     out_file = out_dir.joinpath(f"{out_str}.gif")
     if return_dict is True:
         save_video(pipeline_output["videos"], out_file)
