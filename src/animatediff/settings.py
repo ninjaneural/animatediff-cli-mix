@@ -109,6 +109,7 @@ class ModelConfig(BaseSettings):
     clip_skip: int = 1  # skip the last N-1 layers of the CLIP text encoder
     prompt: list[str] = Field([])  # Prompt(s) to use
     n_prompt: list[str] = Field([])  # Anti-prompt(s) to use
+    lora_map: Dict[str, float] = Field({})
     controlnet_map: Dict[str, Any] = Field({})
 
     class Config(JsonConfig):
