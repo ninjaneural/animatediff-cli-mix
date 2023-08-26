@@ -603,9 +603,8 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             num_videos_per_prompt,
             do_classifier_free_guidance,
             negative_prompt,
-            prompt_embeds=prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds,
-            lora_scale=text_encoder_lora_scale,
+            prompt_embeds=None,
+            negative_prompt_embeds=None,
             clip_skip=clip_skip,
         )
 
