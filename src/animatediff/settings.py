@@ -110,6 +110,7 @@ class ModelConfig(BaseSettings):
     prompt: list[str] = Field([])  # Prompt(s) to use
     n_prompt: list[str] = Field([])  # Anti-prompt(s) to use
     lora_map: Dict[str, float] = Field({})
+    lora_path: Path = Field("models/lora")
     controlnet_map: Dict[str, Any] = Field({})
 
     class Config(JsonConfig):

@@ -1,3 +1,6 @@
+import os
+import glob
+import re
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -281,6 +284,26 @@ def generate(
     save_dir = out_dir.joinpath(f"{time_str}-{model_config.save_name}")
     save_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Will save outputs to ./{path_from_cwd(save_dir)}")
+
+    new_prompts = []
+    lora_map = {}
+    for prompt in model_config.prompt:
+        items = re.findall(r"<lora:([^:]+):([0-9.]+)>", prompt)
+        for lora, weight in items:
+            lora_map[lora] = weight
+        prompt = re.sub(r"<lora:([^:]+):([0-9.]+)>", "", prompt)
+        new_prompts.append(prompt)
+    model_config.prompt = new_prompts
+
+    if model_config.lora_path != None:
+        lora_files = sorted(glob.glob(os.path.join(model_config.lora_path, "**", "*.safetensors"), recursive=True))
+        for lora_file in lora_files:
+            lora_filename = os.path.basename(lora_file)
+            lora_name = os.path.splitext(lora_filename)[0]
+            if lora_name in lora_map:
+                model_config.lora_map[lora_file] = float(lora_map[lora_name])
+
+    print(f"lora_map {model_config.lora_map}")
 
     # beware the pipeline
     global pipeline
