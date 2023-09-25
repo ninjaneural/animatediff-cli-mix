@@ -423,15 +423,15 @@ def generate(
                                         copyfile(input_image, data_dir.joinpath(f"controlnet_image/runtime/{key}/0008.png"))
 
     # lora parsing
-    new_prompts = {}
+    new_prompts = []
     lora_map = {}
-    for key, prompt in model_config.prompt:
+    for prompt in model_config.prompt:
         items = re.findall(r"<lora:([^:]+):([0-9.]+)>", prompt)
         for lora, weight in items:
             lora_map[lora] = weight
         prompt = re.sub(r"<lora:([^:]+):([0-9.]+)>", "", prompt)
-        new_prompts[key] = prompt
-    model_config.prompt_map = new_prompts
+        new_prompts.append(prompt)
+    model_config.prompt = new_prompts
 
     if model_config.lora_path != None:
         lora_files = sorted(glob.glob(os.path.join(model_config.lora_path, "**", "*.safetensors"), recursive=True))
