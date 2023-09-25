@@ -18,7 +18,7 @@
     "worst quality, low quality, cropped, lowres, text, jpeg artifacts, multiple view"
   ],
   "controlnet_map": {
-    "input_image_dir": "controlnet_images/test",
+    "input_image_dir": "controlnet_image/test",
     "controlnet_tile": {
       "enable": false,
       "controlnet_conditioning_scale": 1.0,

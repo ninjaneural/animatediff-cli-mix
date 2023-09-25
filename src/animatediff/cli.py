@@ -2,9 +2,12 @@ import os
 import glob
 import re
 import logging
+from PIL import Image
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
+from shutil import copyfile, rmtree
+from animatediff.schedulers import DiffusionScheduler
 
 import torch
 import typer
@@ -244,6 +247,36 @@ def generate(
             rich_help_panel="Output",
         ),
     ] = False,
+    input_image: Annotated[
+        str,
+        typer.Option(
+            "--input-image",
+            "-I",
+            is_flag=True,
+            help="input png image",
+            rich_help_panel="Output",
+        ),
+    ] = None,
+    input_image_fix: Annotated[
+        int,
+        typer.Option(
+            "--input-image-fix",
+            "-IF",
+            is_flag=False,
+            help="input png image fix",
+            rich_help_panel="Output",
+        ),
+    ] = 1,
+    input_image_flip: Annotated[
+        bool,
+        typer.Option(
+            "--input-image-flip",
+            "-IFL",
+            is_flag=True,
+            help="input png image flip",
+            rich_help_panel="Output",
+        ),
+    ] = False,
     version: Annotated[
         Optional[bool],
         typer.Option(
@@ -278,22 +311,127 @@ def generate(
     logger.info(f"Using base model: {model_name_or_path}")
     base_model_path: Path = get_base_model(model_name_or_path, local_dir=get_dir("data/models/huggingface"))
 
-    # get a timestamp for the output directory
-    time_str = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-    # make the output directory
-    save_dir = out_dir.joinpath(f"{time_str}-{model_config.save_name}")
-    save_dir.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Will save outputs to ./{path_from_cwd(save_dir)}")
+    # input image
+    if input_image != None:
+        im = Image.open(input_image)
+        im.load()
+        if "parameters" in im.info:
+            prompt = ""
+            neg_prompt = ""
+            extra = ""
+            start_neg_prompt = False
+            parameters = im.info["parameters"]
+            for line in parameters.split("\n"):
+                if start_neg_prompt == True:
+                    if line.startswith("Steps:"):
+                        extra = line
+                        break
+                    else:
+                        neg_prompt = neg_prompt + line
+                else:
+                    if line.startswith("Negative prompt:"):
+                        start_neg_prompt = True
+                        neg_prompt = line[len("Negative prompt:") :]
+                    else:
+                        prompt = prompt + line
 
-    new_prompts = []
+            if prompt != "":
+                print(f"[prompt] {prompt}")
+                for index, p in enumerate(model_config.prompt):
+                    model_config.prompt[index] = prompt + " " + p
+            if neg_prompt != "":
+                print(f"[neg_prompt] {neg_prompt}")
+                for index, p in enumerate(model_config.n_prompt):
+                    model_config.n_prompt[index] = neg_prompt + " " + p
+            if extra != "":
+                print(f"[extra] {extra}")
+                setting = dict()
+                x = extra.split(",")
+                for i in x:
+                    try:
+                        key = i[: i.index(":")]
+                        val = i[i.index(":") + 1 :]
+                        setting[str(key).strip()] = str(val).strip()
+                    except Exception as e:
+                        print("error", e)
+
+                if "Seed" in setting:
+                    for index, seed in enumerate(model_config.seed):
+                        model_config.seed[index] = int(float(setting["Seed"]))
+                        if model_config.seed[index] == -1:
+                            try:
+                                filename = os.path.splitext(os.path.basename(input_image))[0]
+                                fileseed = filename.split("-")[1]
+                                model_config.seed[index] = int(fileseed)
+                            except Exception as e:
+                                print("error", e)
+                if "Sampler" in setting:
+                    sampler = setting["Sampler"]
+                    if sampler == "Euler a":
+                        model_config.scheduler = DiffusionScheduler.euler_a
+                    elif sampler == "DDIM":
+                        model_config.scheduler = DiffusionScheduler.ddim
+                    elif sampler == "PNDM":
+                        model_config.scheduler = DiffusionScheduler.pndm
+                    elif sampler == "UniPC":
+                        model_config.scheduler = DiffusionScheduler.unipc
+                    elif sampler == "LMS Karras":
+                        model_config.scheduler = DiffusionScheduler.k_lms
+                    elif sampler == "DPM++ 2M Karras":
+                        model_config.scheduler = DiffusionScheduler.k_dpmpp_2m
+                    elif sampler == "DPM++ SDE Karras":
+                        model_config.scheduler = DiffusionScheduler.k_dpmpp_sde
+                    elif sampler == "DPM++ 2M SDE Karras":
+                        model_config.scheduler = DiffusionScheduler.k_dpmpp_2m_sde
+
+                if "Model" in setting:
+                    model_path = os.path.join(os.path.dirname(model_config.path), setting["Model"] + ".safetensors")
+                    print(f"{model_path=}")
+                    if os.path.exists(model_path):
+                        model_config.path = Path(model_path)
+
+        if os.path.basename(config_path).startswith("prompt_runtime"):
+            for key in model_config.controlnet_map:
+                if key.startswith("controlnet_"):
+                    if not data_dir.joinpath(f"controlnet_image/runtime").is_dir():
+                        data_dir.joinpath(f"controlnet_image/runtime").mkdir()
+                    if data_dir.joinpath(f"controlnet_image/runtime/{key}").is_dir():
+                        rmtree(data_dir.joinpath(f"controlnet_image/runtime/{key}"))
+                    if model_config.controlnet_map[key]["enable"]:
+                        if not data_dir.joinpath(f"controlnet_image/runtime/{key}").is_dir():
+                            data_dir.joinpath(f"controlnet_image/runtime/{key}").mkdir()
+
+                        if input_image_fix > 0:
+                            if input_image_flip:
+                                im_temp = im.transpose(Image.FLIP_LEFT_RIGHT)
+                                im_temp.save(data_dir.joinpath(f"controlnet_image/runtime/{key}/0000.png"))
+                            else:
+                                copyfile(input_image, data_dir.joinpath(f"controlnet_image/runtime/{key}/0000.png"))
+
+                            if key == "controlnet_openpose":
+                                if input_image_fix > 2:
+                                    if input_image_flip:
+                                        im_temp = im.transpose(Image.FLIP_LEFT_RIGHT)
+                                        im_temp.save(data_dir.joinpath(f"controlnet_image/runtime/{key}/0016.png"))
+                                    else:
+                                        copyfile(input_image, data_dir.joinpath(f"controlnet_image/runtime/{key}/0016.png"))
+                                elif input_image_fix > 1:
+                                    if input_image_flip:
+                                        im_temp = im.transpose(Image.FLIP_LEFT_RIGHT)
+                                        im_temp.save(data_dir.joinpath(f"controlnet_image/runtime/{key}/0008.png"))
+                                    else:
+                                        copyfile(input_image, data_dir.joinpath(f"controlnet_image/runtime/{key}/0008.png"))
+
+    # lora parsing
+    new_prompts = {}
     lora_map = {}
-    for prompt in model_config.prompt:
+    for key, prompt in model_config.prompt:
         items = re.findall(r"<lora:([^:]+):([0-9.]+)>", prompt)
         for lora, weight in items:
             lora_map[lora] = weight
         prompt = re.sub(r"<lora:([^:]+):([0-9.]+)>", "", prompt)
-        new_prompts.append(prompt)
-    model_config.prompt = new_prompts
+        new_prompts[key] = prompt
+    model_config.prompt_map = new_prompts
 
     if model_config.lora_path != None:
         lora_files = sorted(glob.glob(os.path.join(model_config.lora_path, "**", "*.safetensors"), recursive=True))
@@ -303,7 +441,17 @@ def generate(
             if lora_name in lora_map:
                 model_config.lora_map[lora_file] = float(lora_map[lora_name])
 
-    print(f"lora_map {model_config.lora_map}")
+    print(f"{model_config.seed=}")
+    print(f"{model_config.prompt=}")
+    print(f"{model_config.lora_map=}")
+    print(f"{model_config.scheduler=}")
+
+    # get a timestamp for the output directory
+    time_str = datetime.now().strftime("%Y-%m-%d")
+    # make the output directory
+    save_dir = out_dir.joinpath(f"{time_str}-{model_config.seed[0]}-{model_config.save_name}")
+    save_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Will save outputs to ./{path_from_cwd(save_dir)}")
 
     # beware the pipeline
     global pipeline
