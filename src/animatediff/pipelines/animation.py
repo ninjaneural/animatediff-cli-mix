@@ -25,8 +25,6 @@ from diffusers.utils import (
     deprecate,
     is_accelerate_available,
     is_accelerate_version,
-    is_compiled_module,
-    randn_tensor,
 )
 from diffusers.utils.torch_utils import randn_tensor
 from einops import rearrange
