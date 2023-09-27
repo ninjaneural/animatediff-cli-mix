@@ -75,3 +75,12 @@ def get_resized_image(org_image_path: str, us_width: int, us_height: int):
         us_height = H / W * us_width
 
     return resize_for_condition_image(image, us_width, us_height)
+
+def relative_path(path: PathLike, base: PathLike = Path.cwd()) -> str:
+    path = Path(path).resolve()
+    base = Path(base).resolve()
+    try:
+        relpath = str(path.relative_to(base))
+    except ValueError:
+        relpath = str(path)
+    return relpath

@@ -28,6 +28,7 @@ from diffusers.utils import (
     is_compiled_module,
     randn_tensor,
 )
+from diffusers.utils.torch_utils import randn_tensor
 from einops import rearrange
 from packaging import version
 from tqdm.rich import tqdm
@@ -575,7 +576,7 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
         width = width or self.unet.config.sample_size * self.vae_scale_factor
 
         # 16 frames is max reliable number for one-shot mode, so we use sequential mode for longer videos
-        sequential_mode = video_length is not None and video_length > 48
+        sequential_mode = video_length is not None and video_length > 16
 
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(prompt, height, width, callback_steps, negative_prompt, prompt_embeds, negative_prompt_embeds)
@@ -588,7 +589,11 @@ class AnimationPipeline(DiffusionPipeline, TextualInversionLoaderMixin):
             batch_size = len(prompt)
 
         device = self._execution_device
-        latents_device = torch.device("cpu") if sequential_mode else device
+        latents_device = kwargs.pop("latents_device", None)
+        if latents_device is None:
+            latents_device = torch.device("cpu") if sequential_mode else device
+        else:
+            latents_device = torch.device(latents_device)
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`

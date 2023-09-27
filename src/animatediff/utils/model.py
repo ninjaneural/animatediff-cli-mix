@@ -8,9 +8,8 @@ from huggingface_hub import hf_hub_download
 from torch import nn
 
 from animatediff import HF_HUB_CACHE, HF_MODULE_REPO, get_dir
-from animatediff.settings import CKPT_EXTENSIONS
 from animatediff.utils.huggingface import get_hf_pipeline
-from animatediff.utils.util import path_from_cwd
+from animatediff.utils.util import relative_path
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +19,10 @@ pipeline_dir = data_dir.joinpath("models/huggingface")
 
 # for the nop_train() monkeypatch
 T = TypeVar("T", bound=nn.Module)
+
+MMV2_DIM_KEY = (
+    "up_blocks.0.motion_modules.1.temporal_transformer.transformer_blocks.0.attention_blocks.0.pos_encoder.pe"
+)
 
 
 def nop_train(self: T, mode: bool = True) -> T:
@@ -79,18 +82,18 @@ def get_checkpoint_weights(checkpoint: Path):
 
 def ensure_motion_modules(
     repo_id: str = HF_MODULE_REPO,
+    module_files: list[str] = ["mm_sd_v14", "mm_sd_v15", "mm_sd_v15_v2"],
     fp16: bool = False,
     force: bool = False,
 ):
     """Retrieve the motion modules from HuggingFace Hub."""
-    module_files = ["mm_sd_v14.safetensors", "mm_sd_v15.safetensors"]
     module_dir = get_dir("data/models/motion-module")
     for file in module_files:
-        target_path = module_dir.joinpath(file)
+        target_path = module_dir.joinpath(file).with_suffix(".safetensors")
         if fp16:
             target_path = target_path.with_suffix(".fp16.safetensors")
         if target_path.exists() and force is not True:
-            logger.debug(f"File {path_from_cwd(target_path)} already exists, skipping download")
+            logger.debug(f"File {relative_path(target_path)} already exists, skipping download")
         else:
             result = hf_hub_download(
                 repo_id=repo_id,
@@ -100,4 +103,4 @@ def ensure_motion_modules(
                 local_dir_use_symlinks=False,
                 resume_download=True,
             )
-            logger.debug(f"Downloaded {path_from_cwd(result)}")
+            logger.debug(f"Downloaded {relative_path(result)}")
