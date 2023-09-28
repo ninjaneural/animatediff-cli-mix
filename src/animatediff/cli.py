@@ -277,6 +277,16 @@ def generate(
             rich_help_panel="Output",
         ),
     ] = False,
+    start_input_image: Annotated[
+        str,
+        typer.Option(
+            "--start-input-image",
+            "-SI",
+            is_flag=True,
+            help="input start image",
+            rich_help_panel="Output",
+        ),
+    ] = None,
     version: Annotated[
         Optional[bool],
         typer.Option(
@@ -391,6 +401,11 @@ def generate(
                         model_config.path = Path(model_path)
 
         if os.path.basename(config_path).startswith("prompt_runtime"):
+            if start_input_image!= None:
+                im = Image.open(start_input_image)
+            if input_image_flip:
+                im = im.transpose(Image.FLIP_LEFT_RIGHT)
+
             for key in model_config.controlnet_map:
                 if key.startswith("controlnet_"):
                     if not data_dir.joinpath(f"controlnet_image/runtime").is_dir():
@@ -402,25 +417,16 @@ def generate(
                             data_dir.joinpath(f"controlnet_image/runtime/{key}").mkdir()
 
                         if input_image_fix > 0:
-                            if input_image_flip:
-                                im_temp = im.transpose(Image.FLIP_LEFT_RIGHT)
-                                im_temp.save(data_dir.joinpath(f"controlnet_image/runtime/{key}/0000.png"))
-                            else:
-                                copyfile(input_image, data_dir.joinpath(f"controlnet_image/runtime/{key}/0000.png"))
+                            im.save(data_dir.joinpath(f"controlnet_image/runtime/{key}/0000.png"))
+                            # copyfile(input_image, data_dir.joinpath(f"controlnet_image/runtime/{key}/0000.png"))
 
                             if key == "controlnet_openpose":
                                 if input_image_fix > 2:
-                                    if input_image_flip:
-                                        im_temp = im.transpose(Image.FLIP_LEFT_RIGHT)
-                                        im_temp.save(data_dir.joinpath(f"controlnet_image/runtime/{key}/0016.png"))
-                                    else:
-                                        copyfile(input_image, data_dir.joinpath(f"controlnet_image/runtime/{key}/0016.png"))
+                                    im.save(data_dir.joinpath(f"controlnet_image/runtime/{key}/0016.png"))
+                                    # copyfile(input_image, data_dir.joinpath(f"controlnet_image/runtime/{key}/0016.png"))
                                 elif input_image_fix > 1:
-                                    if input_image_flip:
-                                        im_temp = im.transpose(Image.FLIP_LEFT_RIGHT)
-                                        im_temp.save(data_dir.joinpath(f"controlnet_image/runtime/{key}/0008.png"))
-                                    else:
-                                        copyfile(input_image, data_dir.joinpath(f"controlnet_image/runtime/{key}/0008.png"))
+                                    im.save(data_dir.joinpath(f"controlnet_image/runtime/{key}/0008.png"))
+                                    # copyfile(input_image, data_dir.joinpath(f"controlnet_image/runtime/{key}/0008.png"))
 
     # lora parsing
     new_prompts = []
@@ -452,6 +458,11 @@ def generate(
     save_dir = out_dir.joinpath(f"{time_str}-{model_config.seed[0]}-{model_config.save_name}")
     save_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Will save outputs to ./{relative_path(save_dir)}")
+
+    if input_image != None:
+        copyfile(input_image, save_dir.joinpath(f"input_image.png"))
+    if start_input_image != None:
+        copyfile(start_input_image, save_dir.joinpath(f"start_input_image.png"))
 
     # beware the pipeline
     global pipeline
